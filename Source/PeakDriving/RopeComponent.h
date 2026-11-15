@@ -26,8 +26,24 @@ struct FRopeParticle
 
     bool bIsPinned = false;
     bool bHasContact = false;
-    bool bIsWrappingNode = false;
+    
 };
+
+USTRUCT()
+struct FRopeRoutePoint
+{
+    GENERATED_BODY()
+
+    // The obstacle this point belongs to.
+    TWeakObjectPtr<UPrimitiveComponent> ObstacleComponent;
+
+    // Position and normal stored relative to the obstacle.
+    FVector LocalPosition = FVector::ZeroVector;
+    FVector LocalNormal = FVector::ZeroVector;
+};
+
+class UCableComponent;
+class USceneComponent;
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PEAKDRIVING_API URopeComponent : public UActorComponent
@@ -77,6 +93,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Endpoints")
     AActor* EndEndpoint = nullptr;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Simulation")
+    float RopeSubstepTime = 0.008f;
+
     UFUNCTION(BlueprintCallable, Category = "Rope")
     void StartRope(FVector Start, FVector End);
 
@@ -85,6 +104,15 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "Rope")
     void SetRopeLength(float NewLength);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Obstacle Detection")
+    float ObstacleTraceRadius = 3.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Obstacle Detection")
+    TEnumAsByte<ECollisionChannel> ObstacleTraceChannel = ECC_Visibility;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rope|Obstacle Detection")
+    bool bDrawDebugObstacleTrace = true;
 
     void DrawDebugRope();
 
@@ -103,6 +131,7 @@ protected:
 private:
 
     TArray<FRopeParticle> Particles;
+    TArray<FRopeRoutePoint> RoutePoints;
 
     FVector StartLocation;
     FVector EndLocation;
@@ -110,10 +139,31 @@ private:
     bool bIsSimulating = false;
     float Accumulator = 0.0f;
 
+    UPROPERTY()
+    UCableComponent* CableComponent = nullptr;
+
     void Simulate(float DeltaTime);
     void ApplyVerletIntegration(float DeltaTime);
     void SolveConstraints();
     void ResolveCollisions();
     void UpdateEndpoints();
     void UpdateWrappingNodes();
+    void UpdateObstacleDetection();
+
+    UPROPERTY()
+    USceneComponent* RouteAnchor = nullptr;
+
+    UPROPERTY()
+    UCableComponent* RouteCableComponent = nullptr;
+
+    UPROPERTY()
+    TArray<TObjectPtr<USceneComponent>> RouteAnchors;
+
+    UPROPERTY()
+    TArray<TObjectPtr<UCableComponent>> CableSections;
+
+    FVector EndEndpointLocalLocation = FVector::ZeroVector;
+
+    void UpdateCableRoute();
+
 };

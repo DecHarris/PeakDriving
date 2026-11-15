@@ -6,6 +6,8 @@
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "CollisionShape.h"
+#include "Components/SceneComponent.h"
+#include "CableComponent.h"
 #include "DrawDebugHelpers.h"
 
 URopeComponent::URopeComponent()
@@ -20,47 +22,201 @@ void URopeComponent::BeginPlay()
 
 void URopeComponent::StartRope(FVector Start, FVector End)
 {
-    StartLocation = Start;
-    EndLocation = End;
+    StopRope();
 
-    Particles.Empty();
+    UE_LOG(LogTemp, Warning,
+        TEXT("ROPEDEBUG Cable pointer after creation: %s"),
+        CableComponent ? TEXT("VALID") : TEXT("NULL"));
 
-    const int32 SegmentCount = FMath::Max(
-        1,
-        FMath::CeilToInt(RopeLength / ParticleSpacing)
-    );
+    AActor* Owner = GetOwner();
 
-    for (int32 i = 0; i <= SegmentCount; i++)
+    if (!Owner)
+        return;
+
+    // Find the component that the beginning of the rope follows.
+    USceneComponent* StartComponent = nullptr;
+
+    if (StartEndpoint)
     {
-        const float Alpha = static_cast<float>(i) / SegmentCount;
-
-        FRopeParticle Particle;
-
-        Particle.Position = FMath::Lerp(
-            Start,
-            End,
-            Alpha
-        );
-
-        Particle.PreviousPosition = Particle.Position;
-
-        Particle.bIsPinned = (i == 0 || i == SegmentCount);
-
-        Particles.Add(Particle);
+        StartComponent = StartEndpoint->GetRootComponent();
+    }
+    else
+    {
+        StartComponent = Owner->GetRootComponent();
     }
 
-    bIsSimulating = true;
+    if (!StartComponent)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("ROPEDEBUG Rope: No valid start component."));
+        return;
+    }
+
+    // Create the cable.
+    CableComponent = NewObject<UCableComponent>(
+        Owner,
+        TEXT("RuntimeRopeCable")
+    );
+
+    if (!CableComponent)
+        return;
+
+    // Attach the cable component to the start component.
+    CableComponent->SetupAttachment(StartComponent);
+
+    // Configure the cable before registering it.
+    CableComponent->CableLength = RopeLength;
+
+    CableComponent->NumSegments = FMath::Clamp(
+        FMath::CeilToInt(RopeLength / ParticleSpacing),
+        8,
+        64
+    );
+
+    CableComponent->SolverIterations = 8;
+    CableComponent->CableGravityScale = GravityScale;
+    CableComponent->CableWidth = 3.0f;
+    CableComponent->bUseSubstepping = true;
+    CableComponent->SubstepTime = RopeSubstepTime;
+
+    CableComponent->bEnableCollision = false;
+
+    // Fix the beginning of the cable to its parent component.
+    CableComponent->bAttachStart = true;
+
+    // Initially leave the end unattached.
+    CableComponent->bAttachEnd = false;
+
+    // Position the cable at the supplied world position.
+    CableComponent->SetWorldLocation(Start);
+
+    // Register the component so it can simulate and render.
+    CableComponent->RegisterComponent();
+
+    // Attach the other end if an endpoint actor exists.
+
+
+    
+
+
+
+
+    if (EndEndpoint)
+    {
+        USceneComponent* EndComponent =
+            EndEndpoint->GetRootComponent();
+
+        if (EndComponent)
+        {
+            CableComponent->SetAttachEndToComponent(
+                EndComponent,
+                NAME_None
+            );
+
+            // EndLocation is relative to the end component.
+            CableComponent->EndLocation =
+                EndComponent->GetComponentTransform()
+                .InverseTransformPosition(End);
+
+            CableComponent->bAttachEnd = true;
+        }
+    }
+    else
+    {
+        // Keep the end free at the supplied world position.
+        CableComponent->EndLocation =
+            CableComponent->GetComponentTransform()
+            .InverseTransformPosition(End);
+    }
+
+    EndLocation = End;
+
+    if (EndEndpoint && EndEndpoint->GetRootComponent())
+    {
+        EndEndpointLocalLocation =
+            EndEndpoint->GetRootComponent()
+            ->GetComponentTransform()
+            .InverseTransformPosition(End);
+    }
+    else
+    {
+        EndEndpointLocalLocation =
+            CableComponent->GetComponentTransform()
+            .InverseTransformPosition(End);
+    }
+
+    // Disable the old Verlet simulation.
+    bIsSimulating = false;
+    Particles.Empty();
+
+    UE_LOG(LogTemp, Log, TEXT("ROPEDEBUG Rope: Cable created. Length: %f"), RopeLength);
 }
+
 
 void URopeComponent::StopRope()
 {
     bIsSimulating = false;
     Particles.Empty();
+    RoutePoints.Empty();
+
+    // Destroy all additional cable sections.
+    for (UCableComponent* Section : CableSections)
+    {
+        if (Section)
+        {
+            Section->DestroyComponent();
+        }
+    }
+
+    CableSections.Empty();
+
+    // Destroy all route anchors.
+    for (USceneComponent* Anchor : RouteAnchors)
+    {
+        if (Anchor)
+        {
+            Anchor->DestroyComponent();
+        }
+    }
+
+    RouteAnchors.Empty();
+
+    // Clean up the old single-route components.
+    if (RouteCableComponent)
+    {
+        RouteCableComponent->DestroyComponent();
+        RouteCableComponent = nullptr;
+    }
+
+    if (RouteAnchor)
+    {
+        RouteAnchor->DestroyComponent();
+        RouteAnchor = nullptr;
+    }
+
+    // Destroy the original cable.
+    if (CableComponent)
+    {
+        CableComponent->DestroyComponent();
+        CableComponent = nullptr;
+    }
 }
+
 
 void URopeComponent::SetRopeLength(float NewLength)
 {
-    RopeLength = FMath::Max(10.0f, NewLength);
+    RopeLength = FMath::Max(1.0f, NewLength);
+
+    if (!CableComponent)
+        return;
+
+    CableComponent->CableLength = RopeLength;
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("ROPEDEBUG Length: %f | Segments: %d | Attach Start: %s | Attach End: %s"),
+        CableComponent->CableLength,
+        CableComponent->NumSegments,
+        CableComponent->bAttachStart ? TEXT("TRUE") : TEXT("FALSE"),
+        CableComponent->bAttachEnd ? TEXT("TRUE") : TEXT("FALSE"));
 }
 
 const TArray<FRopeParticle>& URopeComponent::GetParticles() const
@@ -74,15 +230,472 @@ void URopeComponent::TickComponent(
     FActorComponentTickFunction* ThisTickFunction
 )
 {
-    Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+    Super::TickComponent(
+        DeltaTime,
+        TickType,
+        ThisTickFunction
+    );
 
-    if (!bIsSimulating)
+    if (!CableComponent)
         return;
 
-    Simulate(DeltaTime);
+    UpdateObstacleDetection();
 
-    DrawDebugRope();
+    UpdateCableRoute();
 }
+
+
+void URopeComponent::UpdateObstacleDetection()
+{
+    UWorld* World = GetWorld();
+
+    if (!World || !CableComponent)
+        return;
+
+    // Get the current start position.
+    const FVector TraceStart = CableComponent->GetComponentLocation();
+
+    // Get the actual destination position.
+    FVector TraceEnd;
+
+    if (EndEndpoint && EndEndpoint->GetRootComponent())
+    {
+        TraceEnd = EndEndpoint->GetRootComponent()
+            ->GetComponentTransform()
+            .TransformPosition(EndEndpointLocalLocation);
+    }
+    else
+    {
+        TraceEnd = CableComponent->GetComponentTransform()
+            .TransformPosition(EndEndpointLocalLocation);
+    }
+
+    // Ignore the rope owner and endpoint actors.
+    FCollisionQueryParams QueryParams(
+        SCENE_QUERY_STAT(RopeObstacleDetection),
+        false
+    );
+
+    QueryParams.AddIgnoredActor(GetOwner());
+
+    if (StartEndpoint)
+        QueryParams.AddIgnoredActor(StartEndpoint);
+
+    if (EndEndpoint)
+        QueryParams.AddIgnoredActor(EndEndpoint);
+
+    // Find the first obstructed section.
+    for (int32 SectionIndex = 0;
+        SectionIndex <= RoutePoints.Num();
+        SectionIndex++)
+    {
+        FVector SectionStart = TraceStart;
+        FVector SectionEnd = TraceEnd;
+
+        // Start at the previous route point.
+        if (SectionIndex > 0)
+        {
+            const FRopeRoutePoint& PreviousPoint =
+                RoutePoints[SectionIndex - 1];
+
+            if (!PreviousPoint.ObstacleComponent.IsValid())
+                continue;
+
+            SectionStart =
+                PreviousPoint.ObstacleComponent->GetComponentTransform()
+                .TransformPosition(PreviousPoint.LocalPosition);
+        }
+
+        // End at the next route point.
+        if (SectionIndex < RoutePoints.Num())
+        {
+            const FRopeRoutePoint& NextPoint =
+                RoutePoints[SectionIndex];
+
+            if (!NextPoint.ObstacleComponent.IsValid())
+                continue;
+
+            SectionEnd =
+                NextPoint.ObstacleComponent->GetComponentTransform()
+                .TransformPosition(NextPoint.LocalPosition);
+        }
+
+        FHitResult Hit;
+        FCollisionQueryParams SectionQueryParams = QueryParams;
+
+        // Ignore the obstacle belonging to the previous route point.
+        if (SectionIndex > 0)
+        {
+            if (UPrimitiveComponent* PreviousObstacle =
+                RoutePoints[SectionIndex - 1].ObstacleComponent.Get())
+            {
+                SectionQueryParams.AddIgnoredComponent(PreviousObstacle);
+            }
+        }
+
+        // Ignore the obstacle belonging to the next route point.
+        if (SectionIndex < RoutePoints.Num())
+        {
+            if (UPrimitiveComponent* NextObstacle =
+                RoutePoints[SectionIndex].ObstacleComponent.Get())
+            {
+                SectionQueryParams.AddIgnoredComponent(NextObstacle);
+            }
+        }
+        const bool bHitObstacle = GetWorld()->SweepSingleByChannel(
+            Hit,
+            SectionStart,
+            SectionEnd,
+            FQuat::Identity,
+            ObstacleTraceChannel,
+            FCollisionShape::MakeSphere(ObstacleTraceRadius),
+            SectionQueryParams
+        );
+
+        // Draw the current section trace.
+        if (bDrawDebugObstacleTrace)
+        {
+            DrawDebugLine(
+                World,
+                SectionStart,
+                SectionEnd,
+                bHitObstacle ? FColor::Red : FColor::Green,
+                false,
+                0.0f,
+                0,
+                2.0f
+            );
+        }
+
+        // No obstacle found in this section.
+        if (!bHitObstacle || !Hit.GetComponent())
+            continue;
+
+        UPrimitiveComponent* HitComponent = Hit.GetComponent();
+
+        // Avoid adding another point to the same obstacle
+        // when it is already the end of this section.
+        if (SectionIndex < RoutePoints.Num() &&
+            RoutePoints[SectionIndex].ObstacleComponent.Get() == HitComponent)
+        {
+            continue;
+        }
+
+        // Create a new route point.
+        FRopeRoutePoint NewPoint;
+
+        NewPoint.ObstacleComponent = HitComponent;
+
+        const FVector Normal = Hit.ImpactNormal.GetSafeNormal();
+
+        const FVector WorldPosition =
+            Hit.ImpactPoint + Normal * (ObstacleTraceRadius + 5.0f);
+
+        const FTransform Transform =
+            HitComponent->GetComponentTransform();
+
+        NewPoint.LocalPosition =
+            Transform.InverseTransformPosition(WorldPosition);
+
+        NewPoint.LocalNormal =
+            Transform.InverseTransformVectorNoScale(Normal)
+            .GetSafeNormal();
+
+        // Insert the new point at the section where
+        // the obstruction was detected.
+        RoutePoints.Insert(NewPoint, SectionIndex);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("ROPE: Inserted route point %d on %s"),
+            SectionIndex,
+            *HitComponent->GetName());
+
+        // Only insert one point per tick.
+        break;
+    }
+
+    // Draw all existing route points.
+    if (bDrawDebugObstacleTrace)
+    {
+        for (const FRopeRoutePoint& Point : RoutePoints)
+        {
+            UPrimitiveComponent* Component =
+                Point.ObstacleComponent.Get();
+
+            if (!Component)
+                continue;
+
+            const FTransform Transform =
+                Component->GetComponentTransform();
+
+            const FVector WorldPosition =
+                Transform.TransformPosition(Point.LocalPosition);
+
+            const FVector WorldNormal =
+                Transform.TransformVectorNoScale(Point.LocalNormal)
+                .GetSafeNormal();
+
+            DrawDebugSphere(
+                World,
+                WorldPosition,
+                10.0f,
+                12,
+                FColor::Magenta,
+                false,
+                0.0f
+            );
+
+            DrawDebugDirectionalArrow(
+                World,
+                WorldPosition,
+                WorldPosition + WorldNormal * 25.0f,
+                8.0f,
+                FColor::Blue,
+                false,
+                0.0f,
+                0,
+                2.0f
+            );
+        }
+    }
+}
+
+
+
+void URopeComponent::UpdateCableRoute()
+{
+    if (!CableComponent)
+        return;
+
+    const int32 NumRoutePoints = RoutePoints.Num();
+
+    // --------------------------------------------------
+    // VALIDATE ROUTE POINTS
+    // --------------------------------------------------
+
+    for (int32 i = RoutePoints.Num() - 1; i >= 0; i--)
+    {
+        if (!RoutePoints[i].ObstacleComponent.IsValid())
+        {
+            RoutePoints.RemoveAt(i);
+        }
+    }
+
+    const int32 ValidRouteCount = RoutePoints.Num();
+
+    // --------------------------------------------------
+    // REMOVE OLD SINGLE-ROUTE COMPONENTS
+    // --------------------------------------------------
+
+    if (RouteAnchor)
+    {
+        RouteAnchor->DestroyComponent();
+        RouteAnchor = nullptr;
+    }
+
+    if (RouteCableComponent)
+    {
+        RouteCableComponent->DestroyComponent();
+        RouteCableComponent = nullptr;
+    }
+
+    // --------------------------------------------------
+    // ENSURE CORRECT NUMBER OF ANCHORS
+    // --------------------------------------------------
+
+    while (RouteAnchors.Num() > ValidRouteCount)
+    {
+        if (RouteAnchors.Last())
+            RouteAnchors.Last()->DestroyComponent();
+
+        RouteAnchors.RemoveAt(RouteAnchors.Num() - 1);
+    }
+
+    while (RouteAnchors.Num() < ValidRouteCount)
+    {
+        RouteAnchors.Add(nullptr);
+    }
+
+    // --------------------------------------------------
+    // CREATE / UPDATE ROUTE ANCHORS
+    // --------------------------------------------------
+
+    for (int32 i = 0; i < ValidRouteCount; i++)
+    {
+        FRopeRoutePoint& Point = RoutePoints[i];
+
+        UPrimitiveComponent* Obstacle =
+            Point.ObstacleComponent.Get();
+
+        if (!Obstacle)
+            continue;
+
+        if (!RouteAnchors[i])
+        {
+            RouteAnchors[i] = NewObject<USceneComponent>(
+                GetOwner(),
+                NAME_None
+            );
+
+            if (!RouteAnchors[i])
+                continue;
+
+            RouteAnchors[i]->SetupAttachment(Obstacle);
+            RouteAnchors[i]->RegisterComponent();
+        }
+        else if (RouteAnchors[i]->GetAttachParent() != Obstacle)
+        {
+            RouteAnchors[i]->AttachToComponent(
+                Obstacle,
+                FAttachmentTransformRules::KeepWorldTransform
+            );
+        }
+
+        RouteAnchors[i]->SetRelativeLocation(Point.LocalPosition);
+    }
+
+    // --------------------------------------------------
+    // CREATE / REMOVE CABLE SECTIONS
+    // --------------------------------------------------
+
+    const int32 RequiredExtraCables = ValidRouteCount;
+
+    while (CableSections.Num() > RequiredExtraCables)
+    {
+        if (CableSections.Last())
+            CableSections.Last()->DestroyComponent();
+
+        CableSections.RemoveAt(CableSections.Num() - 1);
+    }
+
+    while (CableSections.Num() < RequiredExtraCables)
+    {
+        CableSections.Add(nullptr);
+    }
+
+    // --------------------------------------------------
+    // CONFIGURE ORIGINAL CABLE
+    // --------------------------------------------------
+
+    if (ValidRouteCount > 0)
+    {
+        CableComponent->CableLength =
+            RopeLength / (ValidRouteCount + 1);
+
+        CableComponent->SetAttachEndToComponent(
+            RouteAnchors[0],
+            NAME_None
+        );
+
+        CableComponent->EndLocation = FVector::ZeroVector;
+        CableComponent->bAttachEnd = true;
+    }
+    else
+    {
+        CableComponent->CableLength = RopeLength;
+
+        if (EndEndpoint && EndEndpoint->GetRootComponent())
+        {
+            USceneComponent* EndComponent =
+                EndEndpoint->GetRootComponent();
+
+            CableComponent->SetAttachEndToComponent(
+                EndComponent,
+                NAME_None
+            );
+
+            CableComponent->EndLocation =
+                EndEndpointLocalLocation;
+
+            CableComponent->bAttachEnd = true;
+        }
+        else
+        {
+            CableComponent->SetAttachEndToComponent(nullptr);
+            CableComponent->EndLocation =
+                EndEndpointLocalLocation;
+
+            CableComponent->bAttachEnd = false;
+        }
+    }
+
+    // --------------------------------------------------
+    // CONFIGURE ADDITIONAL CABLE SECTIONS
+    // --------------------------------------------------
+
+    for (int32 i = 0; i < ValidRouteCount; i++)
+    {
+        UCableComponent* Section = CableSections[i];
+
+        if (!Section)
+        {
+            Section = NewObject<UCableComponent>(
+                GetOwner(),
+                NAME_None
+            );
+
+            if (!Section)
+                continue;
+
+            Section->SetupAttachment(RouteAnchors[i]);
+
+            Section->CableLength =
+                RopeLength / (ValidRouteCount + 1);
+
+            Section->NumSegments = FMath::Clamp(
+                CableComponent->NumSegments / (ValidRouteCount + 1),
+                4,
+                32
+            );
+
+            Section->SolverIterations = 8;
+            Section->CableGravityScale = GravityScale;
+            Section->CableWidth = CableComponent->CableWidth;
+
+            Section->bUseSubstepping = true;
+            Section->SubstepTime = RopeSubstepTime;
+
+            Section->bEnableCollision = false;
+
+            Section->bAttachStart = true;
+            Section->bAttachEnd = false;
+
+            Section->RegisterComponent();
+
+            CableSections[i] = Section;
+        }
+
+        // Attach the end of this section to the next anchor,
+        // or to the final destination.
+        if (i + 1 < ValidRouteCount)
+        {
+            Section->SetAttachEndToComponent(
+                RouteAnchors[i + 1],
+                NAME_None
+            );
+
+            Section->EndLocation = FVector::ZeroVector;
+            Section->bAttachEnd = true;
+        }
+        else if (EndEndpoint && EndEndpoint->GetRootComponent())
+        {
+            Section->SetAttachEndToComponent(
+                EndEndpoint->GetRootComponent(),
+                NAME_None
+            );
+
+            Section->EndLocation = EndEndpointLocalLocation;
+            Section->bAttachEnd = true;
+        }
+        else
+        {
+            Section->SetAttachEndToComponent(nullptr);
+            Section->EndLocation = EndEndpointLocalLocation;
+            Section->bAttachEnd = false;
+        }
+    }
+}
+
 
 void URopeComponent::ApplyVerletIntegration(float DeltaTime)
 {
