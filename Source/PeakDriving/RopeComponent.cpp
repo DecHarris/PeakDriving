@@ -320,37 +320,19 @@ void URopeComponent::UpdateObstacleDetection()
                 .TransformPosition(NextPoint.LocalPosition);
         }
 
+
         FHitResult Hit;
-        FCollisionQueryParams SectionQueryParams = QueryParams;
 
-        // Ignore the obstacle belonging to the previous route point.
-        if (SectionIndex > 0)
-        {
-            if (UPrimitiveComponent* PreviousObstacle =
-                RoutePoints[SectionIndex - 1].ObstacleComponent.Get())
-            {
-                SectionQueryParams.AddIgnoredComponent(PreviousObstacle);
-            }
-        }
-
-        // Ignore the obstacle belonging to the next route point.
-        if (SectionIndex < RoutePoints.Num())
-        {
-            if (UPrimitiveComponent* NextObstacle =
-                RoutePoints[SectionIndex].ObstacleComponent.Get())
-            {
-                SectionQueryParams.AddIgnoredComponent(NextObstacle);
-            }
-        }
-        const bool bHitObstacle = GetWorld()->SweepSingleByChannel(
+        const bool bHitObstacle = World->SweepSingleByChannel(
             Hit,
             SectionStart,
             SectionEnd,
             FQuat::Identity,
             ObstacleTraceChannel,
             FCollisionShape::MakeSphere(ObstacleTraceRadius),
-            SectionQueryParams
+            QueryParams
         );
+
 
         // Draw the current section trace.
         if (bDrawDebugObstacleTrace)
@@ -375,11 +357,34 @@ void URopeComponent::UpdateObstacleDetection()
 
         // Avoid adding another point to the same obstacle
         // when it is already the end of this section.
-        if (SectionIndex < RoutePoints.Num() &&
-            RoutePoints[SectionIndex].ObstacleComponent.Get() == HitComponent)
+
+        // Avoid creating a duplicate route point near an existing point.
+        bool bDuplicatePoint = false;
+
+        const FVector HitPosition =
+            Hit.ImpactPoint + Hit.ImpactNormal.GetSafeNormal()
+            * (ObstacleTraceRadius + 5.0f);
+
+        for (const FRopeRoutePoint& ExistingPoint : RoutePoints)
         {
-            continue;
+            if (ExistingPoint.ObstacleComponent.Get() != HitComponent)
+                continue;
+
+            const FVector ExistingWorldPosition =
+                HitComponent->GetComponentTransform()
+                .TransformPosition(ExistingPoint.LocalPosition);
+
+            if (FVector::DistSquared(HitPosition, ExistingWorldPosition)
+                < FMath::Square(20.0f))
+            {
+                bDuplicatePoint = true;
+                break;
+            }
         }
+
+        if (bDuplicatePoint)
+            continue;
+
 
         // Create a new route point.
         FRopeRoutePoint NewPoint;
@@ -388,8 +393,7 @@ void URopeComponent::UpdateObstacleDetection()
 
         const FVector Normal = Hit.ImpactNormal.GetSafeNormal();
 
-        const FVector WorldPosition =
-            Hit.ImpactPoint + Normal * (ObstacleTraceRadius + 5.0f);
+        const FVector WorldPosition = HitPosition;
 
         const FTransform Transform =
             HitComponent->GetComponentTransform();
